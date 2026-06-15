@@ -204,15 +204,54 @@ const messageContainer = document.getElementById('message-container');
 const formContainer = document.getElementById('form-container');
 const successContainer = document.getElementById('success-container');
 
-const hash = window.location.hash;
-const params = new URLSearchParams(hash.substring(1));
-const accessToken = params.get('access_token');
-const type = params.get('type');
+// The recovery link can deliver its session two ways:
+//   • implicit flow  → #access_token=...&type=recovery   (token already in the hash)
+//   • token-hash flow → ?token_hash=...&type=recovery     (we exchange it for a session)
+// Resolve a usable session token from whichever the email used.
+let sessionAccessToken = null;
 
-if (!accessToken || type !== 'recovery') {
+(async function resolveResetSession() {
+    const hashParams = new URLSearchParams(window.location.hash.substring(1));
+    const queryParams = new URLSearchParams(window.location.search);
+
+    const errorDesc = hashParams.get('error_description') || queryParams.get('error_description')
+        || hashParams.get('error') || queryParams.get('error');
+    if (errorDesc) {
+        showMessage(errorDesc + ' Request a new reset link from the AL app.', 'error');
+        submitBtn.disabled = true;
+        return;
+    }
+
+    // 1) Implicit flow — token already present in the hash.
+    const hashToken = hashParams.get('access_token');
+    if (hashToken) { sessionAccessToken = hashToken; return; }
+
+    // 2) Token-hash flow — exchange the one-time token for a recovery session.
+    const tokenHash = queryParams.get('token_hash') || queryParams.get('token');
+    const linkType = queryParams.get('type') || hashParams.get('type') || 'recovery';
+    if (tokenHash) {
+        try {
+            const res = await fetch(`${SUPABASE_URL}/auth/v1/verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY },
+                body: JSON.stringify({ type: linkType, token_hash: tokenHash })
+            });
+            const d = await res.json();
+            if (res.ok && d.access_token) { sessionAccessToken = d.access_token; return; }
+            showMessage((d.msg || d.error_description || 'Invalid or expired reset link.')
+                + ' Request a new one from the AL app.', 'error');
+            submitBtn.disabled = true;
+        } catch (e) {
+            showMessage('Network error verifying the reset link. Please try again.', 'error');
+            submitBtn.disabled = true;
+        }
+        return;
+    }
+
+    // 3) Nothing usable in the URL.
     showMessage('Invalid or expired reset link.', 'error');
     submitBtn.disabled = true;
-}
+})();
 
 function showMessage(text, type) {
     messageContainer.innerHTML = `<div class="message ${type}">${text}</div>`;
@@ -245,6 +284,9 @@ form.addEventListener('submit', async (e) => {
     if (newPassword !== confirmPassword) {
         showMessage('Passwords do not match!', 'error'); return;
     }
+    if (!sessionAccessToken) {
+        showMessage('Invalid or expired reset link. Request a new one from the AL app.', 'error'); return;
+    }
 
     submitBtn.disabled = true;
     submitBtn.textContent = 'Updating Password...';
@@ -256,7 +298,7 @@ form.addEventListener('submit', async (e) => {
             headers: {
                 'Content-Type': 'application/json',
                 'apikey': SUPABASE_ANON_KEY,
-                'Authorization': `Bearer ${accessToken}`
+                'Authorization': `Bearer ${sessionAccessToken}`
             },
             body: JSON.stringify({ password: newPassword })
         });
